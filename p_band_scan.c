@@ -63,49 +63,55 @@ void remove_dc(double* data, int num) {
 }
 
 
-struct threadVariables{
+typedef struct{
+  signal* sig;
+  int id;
+  int filter_order;
+  double bandwidth; 
+  double* band_power;
+  double* filter_coeffs;
   int num_bands;
   int num_threads;
   int num_processors;
-  double bandwidth;
-  double* band_power;
-  int filter_order;
-  double* filter_coeffs;
-  double Fs;
 
-};
+} threadVariables;
 
 void* worker(void* arg) {
-  long myid   = (long)arg;
-  int blocksize = num_bands / num_threads;
+  threadVariables* vars = (threadVariables*)arg; 
+  int blocksize = vars->num_bands / vars->num_threads;
 
   // put ourselves on the desired processor
   cpu_set_t set;
   CPU_ZERO(&set);
-  CPU_SET(myid % num_processors, &set);
+  CPU_SET(vars->id % vars->num_processors, &set);
   if (sched_setaffinity(0, sizeof(set), &set) < 0) { // do it
     perror("Can't setaffinity"); // hopefully doesn't fail
     exit(-1);
   }
 
-  int mystart = myid * blocksize;
+  int mystart = vars->id * blocksize;
   int myend   = 0;
+  if (vars->id == (vars->num_threads - 1)) { 
+    myend = vars->num_bands;
+  } else {
+    myend = (vars->id + 1) * blocksize;
+  }
 
-  for (int band = 0; band < num_bands; band++) {
+  for (int band = mystart; band < myend; band++) {
     // Make the filter
-    generate_band_pass(sig->Fs,
-                       band * bandwidth + 0.0001, // keep within limits
-                       (band + 1) * bandwidth - 0.0001,
-                       filter_order,
-                       filter_coeffs);
-    hamming_window(filter_order,filter_coeffs);
+    generate_band_pass(vars->sig->Fs,
+                       band * vars->bandwidth + 0.0001, // keep within limits
+                       (band + 1) * vars->bandwidth - 0.0001,
+                       vars->filter_order,
+                       vars->filter_coeffs);
+    hamming_window(vars->filter_order,vars->filter_coeffs);
 
     // Convolve
-    convolve_and_compute_power(sig->num_samples,
-                               sig->data,
-                               filter_order,
-                               filter_coeffs,
-                               &(band_power[band]));
+    convolve_and_compute_power(vars->sig->num_samples,
+                               vars->sig->data,
+                               vars->filter_order,
+                               vars->filter_coeffs,
+                               &(vars->band_power[band]));
 
   }
 
@@ -136,7 +142,18 @@ int analyze_signal(signal* sig, int filter_order, int num_bands, int num_threads
   int bandsPerThread = num_bands/num_threads;
   tid = (pthread_t*)malloc(sizeof(pthread_t) * num_threads);
 
-  for (long i = 0; i < num_threads; i++) {
+  threadVariables arguments[num_threads];
+
+  for (long i = 0; i < num_threads; i++) {\
+    arguments[i].sig = sig;
+    arguments[i].id = i;
+    arguments[i].filter_order = filter_order;
+    arguments[i].bandwidth = bandwidth;
+    arguments[i].band_power = band_power;
+    arguments[i].num_bands = num_bands;
+    arguments[i].num_processors = num_processors;
+    arguments[i].num_threads = num_threads;
+
     int returncode = pthread_create(&(tid[i]), // thread id gets put here
                                     NULL, // use default attributes
                                     worker, // thread will begin in this function
